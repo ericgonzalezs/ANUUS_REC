@@ -1,0 +1,328 @@
+##################################
+##Create context sequences from my genetic map
+#################################
+
+for i in $(ls order_*)
+do
+        name=$(echo $i | cut -d "_" -f 1,2)
+
+grep -v "#" $i |  cut -f 1,2 | while read chr pos; do start=$((pos - 75)); end=$((pos + 75)); samtools faidx Ha412HOv2.0-20181130.genom
+e.fasta $chr:$start-$end | sed "s/$start-$end/$pos/g"  >> $name"_Contextsequences.fa" ; done
+
+done
+
+####################################
+###Map context seqeunces
+####################################
+bwa index ANN1372H1.v1.genome.fasta
+
+for i in $(ls *_Contextsequences.fa)
+
+do
+
+        name=$(echo $i | cut -d "." -f 1)
+
+bwa mem ANN1372H1.v1.genome.fasta  $i > $name".sam"
+
+samtools view -b $name".sam" > $name".bam"
+
+samtools sort $name".bam" -o $name"_sorted.bam"
+
+#convert the alignment to paf file and select markers whose alignments have a MQ > 50, and the same length as the context sequence. Als
+o, keep only alignments that have one snp or less between the context sequence and the reference genome
+samtools calmd $name"_sorted.bam" ANN1372H1.v1.genome.fasta | samtools view -bq 50 - | htsbox  samview -p - | awk '$2 == $11 && ($11 - $10) < 2  {print $1, $5, $6, $8, $9}' > "$name"_Posiciones_de_los_tags.txt
+
+linkagemap=$(echo $name | cut -d "_" -f 1,2)
+
+awk 'NR==FNR{a[$1]=$0; next} {print $0, a[$1]}' <(grep -v "#" "$linkagemap"_informativeMask1_reevaluated_* | awk '{print $1":"$2, $3 }') "$name"_Posiciones_de_los_tags.txt | awk '{print $3, $5 - 75, $7 }' > "$linkagemap"_cm_pos.txt
+
+done
+
+################################
+###ADD Ha412 positions
+#################################
+for i in $(ls *_Contextsequences.fa)
+
+do
+
+        name=$(echo $i | cut -d "." -f 1)
+
+linkagemap=$(echo $name | cut -d "_" -f 1,2)
+
+awk 'NR==FNR{a[$1]=$0; next} {print $0, a[$1]}' <(grep -v "#" "$linkagemap"_informativeMask1_reevaluated_* | awk '{print $1":"$2, $3 }' ) "$name"_Posiciones_de_los_tags.txt | awk '{print $1, $3, $5 - 75, $7 }' > "$linkagemap"Ha412too_cm_pos.txt
+
+done
+
+#######################################
+########SeparateHa412pos
+######################################
+for i in $(ls *Ha412too_cm_pos.txt)
+do
+        name=$(echo $i | cut -d "." -f 1)
+
+paste  <(cut -d : -f 1 $i) <(cut -d : -f 2 $i) | tr -s ' ' '\t'  >  "$name"_separated.txt
+
+done
+
+#########################################
+######flip chr if they are i reverse order
+########################################
+for i in $(ls *_separated.txt)
+do
+        Rscript Anted_defilparregions_fliparchr.R $i
+
+done
+
+#########################################
+########Anted_defilparregions_fliparchr.R looks like this
+#########################################
+args <- commandArgs(trailingOnly = TRUE)
+
+RRtable <- args[1]
+
+name <- sub("(order_LG[0-9]+).*", "\\1", RRtable)
+
+ALL <- read.table(RRtable, header=F)
+
+#if (all(diff(unique(ALL$gen)) < 0)) {
+ # ALL$gen <- rev(ALL$gen)
+#}
+
+gen_diff <- diff(unique(ALL$V5))
+
+neg_proportion <- mean(gen_diff < 0)
+
+if (neg_proportion > 0.6) {
+  ALL$V5 <- max(ALL$V5) + min(ALL$V5) - ALL$V5
+}
+
+write.table(ALL, file=paste(name, "ifinvertedcorrected", ".txt", sep="_"), quote = F, row.names = F, col.names = F, sep = "\t")
+
+
+################################################
+######Flip INV regions
+################################################
+for i in $(ls *_ifinvertedcorrected_.txt)
+do
+
+        name=$(echo $i | cut -d "." -f 1)
+
+        awk -F'\t' -v OFS='\t' '
+NR == 1 {
+    header = $0
+    print
+    next
+}
+{
+    for (i = 1; i <= NF; i++) row[NR, i] = $i
+    col2[NR] = $2
+}
+END {
+    n = NR
+    i = 2
+    while (i <= n) {
+        # Look for the start of a descending region
+        if (col2[i] < col2[i - 1]) {
+            start = i - 1
+            # Find where it ends (i.e., values increase again or reach the end)
+            while (i <= n && col2[i] < col2[i - 1]) {
+                i++
+            }
+            end = i - 1
+            # Copy to temp array
+            for (j = start; j <= end; j++) {
+                tmp[j - start + 1] = col2[j]
+            }
+            len = end - start + 1
+            # Sort temp array (ascending) - simple bubble sort
+            for (a = 1; a <= len; a++) {
+                for (b = a + 1; b <= len; b++) {
+                    if (tmp[a] > tmp[b]) {
+                        t = tmp[a]; tmp[a] = tmp[b]; tmp[b] = t
+                    }
+                }
+            }
+            # Write sorted values back to col2
+            for (j = 0; j < len; j++) {
+                col2[start + j] = tmp[j + 1]
+            }
+        } else {
+            i++
+        }
+    }
+
+    # Reconstruct table with corrected col2 values
+    for (r = 2; r <= n; r++) {
+        row[r, 2] = col2[r]
+        for (c = 1; c <= NF; c++) {
+            printf "%s%s", row[r, c], (c < NF ? OFS : ORS)
+        }
+    }
+}
+' $i > "$name"_flipped_regions.txt
+
+
+done
+
+
+#################################################
+#######Calculate RR and plot marey maps
+################################################
+for i in $(ls *_ifinvertedcorrected__flipped_regions.txt)
+do
+
+        Rscript RRggplot.R $i
+
+done
+
+
+##################################################
+########RRggplot.R looks like this
+#################################################
+
+args <- commandArgs(trailingOnly = TRUE)
+
+RRtable <- args[1]
+
+name <- sub("(order_LG[0-9]+).*", "\\1", RRtable)
+
+ALL <- read.table(RRtable, header=F)
+
+#if (all(diff(unique(ALL$gen)) < 0)) {
+ # ALL$gen <- rev(ALL$gen)
+#}
+
+gen_diff <- diff(unique(ALL$V5))
+
+neg_proportion <- mean(gen_diff < 0)
+
+if (neg_proportion > 0.6) {
+  ALL$V5 <- max(ALL$V5) + min(ALL$V5) - ALL$V5
+}
+
+#set cm to start with 0
+ALL$V5  <- ALL$V5 - min(ALL$V5)
+
+Ha412 <- ALL[,c(1,2,5)]
+colnames(Ha412) <- c("chr", "phys", "gen")
+
+ANN1372 <- ALL[,c(3,4,5)]
+colnames(ANN1372) <- c("chr", "phys", "gen")
+
+spline_Ha412 <- smooth.spline(x = Ha412$phys, y = Ha412$gen, spar = 0.3)
+spline_ANN1372 <- smooth.spline(x = ANN1372$phys, y = ANN1372$gen, spar = 0.3)
+
+Ha412_R <-  cbind(Ha412, R=residuals(spline_Ha412))
+ANN1372_R <-  cbind(ANN1372, R=residuals(spline_ANN1372))
+
+Ha412_R_F1 <- subset(Ha412_R, Ha412_R$R > -0.7 & Ha412_R$R < 0.7)
+ANN1372_R_F1 <- subset(ANN1372_R, ANN1372_R$R > -0.7 & ANN1372_R$R < 0.7)
+
+while (any(diff(Ha412_R_F1$gen) < 0)) {
+        violations <- which(diff(Ha412_R_F1$gen) < 0) + 1
+        Ha412_R_F1 <- Ha412_R_F1[-violations, ]
+        }
+
+while (any(diff(ANN1372_R_F1$gen) < 0)) {
+        violations <- which(diff(ANN1372_R_F1$gen) < 0) + 1
+        ANN1372_R_F1 <- ANN1372_R_F1[-violations, ]
+        }
+
+
+
+Ha412_R_F1_spline2 <- smooth.spline(Ha412_R_F1$phys, Ha412_R_F1$gen, spar = 0.3)
+ANN1372_R_F1_spline2 <- smooth.spline(ANN1372_R_F1$phys, ANN1372_R_F1$gen, spar = 0.3)
+
+Ha412_R_F1_spline2_R2 <- cbind(Ha412_R_F1, R2=residuals(Ha412_R_F1_spline2))
+ANN1372_R_F1_spline2_R2 <- cbind(ANN1372_R_F1, R2=residuals(ANN1372_R_F1_spline2))
+
+Ha412_R_F1_spline2_R2_F2 <- subset(Ha412_R_F1_spline2_R2, Ha412_R_F1_spline2_R2$R2 > -0.25 & Ha412_R_F1_spline2_R2$R2 < 0.25)
+ANN1372_R_F1_spline2_R2_F2 <- subset(ANN1372_R_F1_spline2_R2, ANN1372_R_F1_spline2_R2$R2 > -0.25 & ANN1372_R_F1_spline2_R2$R2 < 0.25)
+
+Ha412_R_F1_spline2_R2_F2_spline3 <- smooth.spline(Ha412_R_F1_spline2_R2_F2$phys, Ha412_R_F1_spline2_R2_F2$gen, spar = 0.3)
+ANN1372_R_F1_spline2_R2_F2_spline3 <- smooth.spline(ANN1372_R_F1_spline2_R2_F2$phys, ANN1372_R_F1_spline2_R2_F2$gen, spar = 0.3)
+
+Ha412_R_F1_spline2_R2_F2_Pos_500kb <- seq(0, max(Ha412_R_F1_spline2_R2_F2$phys, na.rm = TRUE), by = 500000)
+ANN1372_R_F1_spline2_R2_F2_Pos_500kb <- seq(0, max(ANN1372_R_F1_spline2_R2_F2$phys, na.rm = TRUE), by = 500000)
+
+Ha412_derivatives_500kb <- predict(Ha412_R_F1_spline2_R2_F2_spline3, Ha412_R_F1_spline2_R2_F2_Pos_500kb, deriv = 1)$y
+ANN1372_derivatives_500kb <- predict(ANN1372_R_F1_spline2_R2_F2_spline3, ANN1372_R_F1_spline2_R2_F2_Pos_500kb, deriv = 1)$y
+
+Ha412_500kb_2_der <- cbind(Ha412_R_F1_spline2_R2_F2_Pos_500kb, RR=Ha412_derivatives_500kb * 1e6)
+ANN1372_500kb_2_der <- cbind(ANN1372_R_F1_spline2_R2_F2_Pos_500kb, RR=ANN1372_derivatives_500kb * 1e6)
+
+
+Ha412_500kb_2_der <- as.data.frame(Ha412_500kb_2_der)
+ANN1372_500kb_2_der <- as.data.frame(ANN1372_500kb_2_der)
+
+Ha412_500kb_2_der$RR[Ha412_500kb_2_der$RR < 0] <- 0
+ANN1372_500kb_2_der$RR[ANN1372_500kb_2_der$RR < 0] <- 0
+
+# Get chromosome names
+chr_Ha412 <- unique(Ha412_R_F1_spline2_R2_F2$chr)
+chr_ANN1372 <- unique(ANN1372_R_F1_spline2_R2_F2$chr)
+
+library(ggplot2)
+library(dplyr)
+
+# White background, no grid
+my_theme <- theme_bw() +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5))  # center title
+
+
+# ---- Ha412 RR ----
+spline_Ha412_RR <- with(Ha412_500kb_2_der, smooth.spline(Ha412_R_F1_spline2_R2_F2_Pos_500kb, RR, spar = 0.3))
+spline_df_Ha412_RR <- data.frame(x = spline_Ha412_RR$x, y = spline_Ha412_RR$y)
+
+jpeg(paste("Ha412", chr_Ha412, "RR", ".jpg", sep = "_"), width = 1200, height = 600)
+ggplot(spline_df_Ha412_RR, aes(x = x, y = y)) +
+  geom_line(color = "blue", size = 1.2) +
+  labs(title = chr_Ha412, x = "Physical position", y = "Recombination rate") +
+  my_theme
+dev.off()
+
+# ---- Ha412 Marey ----
+spline_Ha412_Marey <- with(Ha412_R_F1_spline2_R2_F2, smooth.spline(phys, gen, spar = 0.3))
+spline_df_Ha412_Marey <- data.frame(x = spline_Ha412_Marey$x, y = spline_Ha412_Marey$y)
+
+jpeg(paste("Ha412", chr_Ha412, "Marey", ".jpg", sep = "_"), width = 1200, height = 600)
+ggplot(spline_df_Ha412_Marey, aes(x = x, y = y)) +
+  geom_line(color = "red", size = 1.2) +
+  labs(title = chr_Ha412, x = "Physical position", y = "Genetic position") +
+  my_theme
+dev.off()
+
+# ---- ANN1372 RR ----
+spline_ANN1372_RR <- with(ANN1372_500kb_2_der, smooth.spline(ANN1372_R_F1_spline2_R2_F2_Pos_500kb, RR, spar = 0.3))
+spline_df_ANN1372_RR <- data.frame(x = spline_ANN1372_RR$x, y = spline_ANN1372_RR$y)
+
+jpeg(paste("ANN1372", chr_ANN1372, "RR", ".jpg", sep = "_"), width = 1200, height = 600)
+ggplot(spline_df_ANN1372_RR, aes(x = x, y = y)) +
+  geom_line(color = "blue", size = 1.2) +
+  labs(title = chr_ANN1372, x = "Physical position", y = "Recombination rate") +
+  my_theme
+dev.off()
+
+# ---- ANN1372 Marey ----
+spline_ANN1372_Marey <- with(ANN1372_R_F1_spline2_R2_F2, smooth.spline(phys, gen, spar = 0.3))
+spline_df_ANN1372_Marey <- data.frame(x = spline_ANN1372_Marey$x, y = spline_ANN1372_Marey$y)
+
+jpeg(paste("ANN1372", chr_ANN1372, "Marey", ".jpg", sep = "_"), width = 1200, height = 600)
+ggplot(spline_df_ANN1372_Marey, aes(x = x, y = y)) +
+  geom_line(color = "red", size = 1.2) +
+  labs(title = chr_ANN1372, x = "Physical position", y = "Genetic position") +
+  my_theme
+dev.off()
+
+write.table(ALL, file=paste(name, "ifinvertedcorrected", "startat0", ".txt", sep="_"), quote = F, row.names = F, col.names = F)
+
+write.table(Ha412_R_F1_spline2_R2_F2, file=paste("Ha412", name, "ifinvertedcorrected", "Filtered", "startat0", ".txt", sep="_"), quote= F, row.names = F, col.names = F)
+
+write.table(ANN1372_R_F1_spline2_R2_F2, file=paste("ANN1372", name, "ifinvertedcorrected", "Filtered", "startat0", ".txt", sep="_"), quote = F, row.names = F, col.names = F)
+
+
+
+
+
+
