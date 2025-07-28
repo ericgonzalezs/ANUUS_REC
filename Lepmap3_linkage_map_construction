@@ -1,0 +1,115 @@
+#########################################################
+#####Calling parental genoypes
+#########################################################
+zcat post_withpaents_RD_3_40.gz |java -cp /DATA/home/egonzalez/SOFTWARE/LEPMAP3/bin ParentCall2 data=1973_pedigree_parents.txt posteriorFile=- removeNonInformative=1  | gzip >data.call.gz
+
+##########################################################
+#assigning markers to LG and testing different lodLimits as well as the option informativeMask 
+##########################################################
+
+for i in {8..27}
+
+do
+
+zcat data.call.gz |java -cp /DATA/home/egonzalez/SOFTWARE/LEPMAP3/bin SeparateChromosomes2 data=- lodLimit=$i  distortionLod=1 sizeLimit=10  > map"$i".txt
+
+
+zcat data.call.gz |java -cp /DATA/home/egonzalez/SOFTWARE/LEPMAP3/bin SeparateChromosomes2 data=- lodLimit=$i  distortionLod=1 sizeLimit=10 informativeMask=1 > map"$i"_informativeMask1.txt
+
+done
+
+##################################
+###LG first observations example
+##################################
+sort map5.txt|uniq -c|sort -n
+
+awk '(NR>=7)' data_f.call|cut -f 1,2 >snps.txt
+
+paste snps.txt map5.txt|awk '($3>0)'
+
+###########################################################
+#using the selected parammeters for the LG markers assignment
+###########################################################
+zcat data.call.gz |java -cp /DATA/home/egonzalez/SOFTWARE/LEPMAP3/bin SeparateChromosomes2 data=- lodLimit=10  distortionLod=1 sizeLimit=300 informativeMask=1 > map10_informativeMask1_sizelim300.txt
+
+#########################################################
+#Running JoinSingles2All
+#########################################################
+zcat data.call.gz |java -cp /DATA/home/egonzalez/SOFTWARE/LEPMAP3/bin JoinSingles2All map=map10_informativeMask1_sizelim300.txt data=- lodLimit=8 iterate=1 numThreads=8 informativeMask=1 > map10_informativeMask1_sizelim300_js_iteratedi2.txt
+
+#######################################################
+#Runing OrderMarkers2 and filtering sites
+#######################################################
+
+VAR=("Ha412HOChr17" "Ha412HOChr09" "Ha412HOChr03" "Ha412HOChr04" "Ha412HOChr14" "Ha412HOChr16" "Ha412HOChr10" "Ha412HOChr08" "Ha412HOChr12" "Ha412HOChr13" "Ha412HOChr06"  "Ha412HOChr11" "Ha412HOChr15" "Ha412HOChr05"  "Ha412HOChr02" "Ha412HOChr07" "Ha412HOChr01" )
+
+for i in {1..17}
+
+        do
+ index=$((i - 1))
+ chrom="${VAR[index]}"
+
+###This run first, but was removed for the second round
+#zcat data.call.gz | java -cp /DATA/home/egonzalez/SOFTWARE/LEPMAP3/bin OrderMarkers2 data=- map=map10_informativeMask1_sizelim300_js_iteratedi2.txt calculateIntervals=LG"$i"_intervals.txt  numThreads=10 chromosome=$i informativeMask=1 useKosambi=1 > order_LG"$i"_informativeMask1.txt  2>errorder_LG"$i"_informativeMask1.txt
+
+
+#removing snps that overlap between informativeMask=1 and informativeMask=2
+
+zcat data.call.gz | java -cp /DATA/home/egonzalez/SOFTWARE/LEPMAP3/bin OrderMarkers2 data=- map=map10_informativeMask1_sizelim300_js_iteratedi2.txt numThreads=10 chromosome=$i informativeMask=2 useKosambi=1 > order_LG"$i"_informativeMask2.txt
+
+grep -v "#" order_LG"$i"_informativeMask2.txt | cut -f 1 > LG"$i"_informativeMask2_markerstoremove.txt
+
+###################Remove individuals with more that 6 recombinations
+#I ran this per chr:
+#grep recombinations errorder_LG"$i"_informativeMask1.txt -A 200 | sed  '1d' | awk '$5 > 5 {print $3}' > INDTOREMOVE_LG"$i".txt
+#and I created this
+# cat INDTOREMOVE_LG*txt | sort | uniq > INDTOREMOVE_ALLLG.txt
+
+#Remove markers that map to other chromosomes
+
+awk -vFS="\t" -vOFS="\t" '(NR==FNR){s[NR-1]=$0}(NR!=FNR){if ($1 in s) $1=s[$1];print}' snps.txt order_LG"$i"_informativeMask1.txt > order_LG"$i"_informativeMask1.mapped
+
+awk -v chrom="$chrom" '$1 != chrom {print NR}' order_LG"$i"_informativeMask1.mapped > Row_numbers.txt
+
+awk 'NR==FNR {rows[$1]; next} FNR in rows {print $1}' Row_numbers.txt order_LG"$i"_informativeMask1.txt > Markerpos.txt
+
+#cat LG"$i"_informativeMask2_markerstoremove.txt Markerpos.txt > Markerpos_ALL.txt
+
+#remove markers from repetitive regions
+ grep -v "#" order_LG"$i"_informativeMask1.mapped | awk  '{print $1, $2, $2}' | sed -E 's/ +/\t/g' >Order.bed
+
+bedtools intersect -a Order.bed -b Ha412_Redmasked.bed | cut -f 1,2  > SNPsmasked.txt
+
+grep -n -F -f SNPsmasked.txt order_LG"$i"_informativeMask1.mapped  | cut -d ":" -f 1 > Row_numbers_masked.txt
+
+awk 'NR==FNR {rows[$1]; next} FNR in rows {print $1}'  Row_numbers_masked.txt  order_LG"$i"_informativeMask1.txt > Markerpos2.txt
+
+#cat everything
+
+cat LG"$i"_informativeMask2_markerstoremove.txt Markerpos.txt Markerpos2.txt > Markerpos_ALL.txt
+
+#second marker order
+
+#we ran OrderMarkers2 4 times to select the map with the best maximum likelihood 
+for j in {1..4}
+do
+zcat data.call.gz | cut -f $(zcat data.call.gz  | sed '1,2d' | head -n 1 | awk 'NR==1 {for (i=1; i<=NF; i++) h[$i]=i} NR>1 {if ($1 in h) print h[$1]}'  - INDTOREMOVE_ALLLG.txt | sed ':a;N;$!ba;s/\n/,/g') --complement |  java -cp /DATA/home/egonzalez/SOFTWARE/LEPMAP3/bin OrderMarkers2 data=- evaluateOrder=order_LG"$i"_informativeMask1.txt calculateIntervals=Intervals_LG"$i"_reevaluated_"$j".txt  numThreads=20 chromosome=$i informativeMask=1 useKosambi=1 removeMarkers=$(cat Markerpos_ALL.txt | grep -v "#" | sed ':a;N;$!ba;s/\n/\t/g') > order_LG"$i"_informativeMask1_reevaluated_"$j".txt 2>errororder_LG"$i"_informativeMask1_reevaluated_"$j".txt
+
+awk -vFS="\t" -vOFS="\t" '(NR==FNR){s[NR-1]=$0}(NR!=FNR){if ($1 in s) $1=s[$1];print}' snps.txt order_LG"$i"_informativeMask1_reevaluated_"$j".txt > order_LG"$i"_informativeMask1_reevaluated_"$j".mapped
+
+done
+
+done
+
+
+###############################################
+###select the map with the highest likelehood
+###############################################
+for j in {1..17}
+        do
+                        grep Final errororder_LG"$j"_informativeMask1_reevaluated_*.txt  |  sort -k 4,4n | tail -n 1 >> Best_map.txt
+        done
+
+
+
+
