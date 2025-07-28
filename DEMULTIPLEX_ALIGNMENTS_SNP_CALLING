@@ -1,0 +1,94 @@
+###############################################
+##DEMULTIPLEXING EXAMPLE
+###############################################
+
+#!/bin/bash
+#SBATCH --account=def-rieseber
+#SBATCH --time=1-0
+#SBATCH --ntasks=1
+#SBATCH --mem=10G
+
+module load StdEnv/2023 java/21.0.1
+
+java -Xmx49G -jar GBSX_v1.3.jar --Demultiplexer -f1 22FVVYLT4_1_1_GCTGTTGT-TCGTCTGA_150bp.concat.fastq.gz -f2 22FVVYLT4_1_2_GCTGTTGT-TCGTCTGA_150bp.concat.fastq.gz  -i barcodes.parentals_GCTGTTGT-TCGTCTGA_forGBSX.txt -o PARENTS_TEST -gzip true
+
+
+##############################################
+##ALIGNMENT EXAMPLE
+##############################################
+
+#!/bin/bash
+#SBATCH --account=def-rieseber
+#SBATCH --time=1-0
+#SBATCH --ntasks=1
+#SBATCH --mem=20G
+#SBATCH --array=1-97
+#SBATCH --cpus-per-task=2
+
+module load StdEnv/2023 bwa/0.7.18 picard/3.1.0
+
+i=$(ls *.R1.fastq.gz | head -n $SLURM_ARRAY_TASK_ID | tail -n 1)
+
+#alignment
+bwa mem -t 14 -M -R "@RG\tID:GENOMEQUEBEC\tSM:$name\tPL:ILLUMINA\tLB:no\tPU:unit1" Ha412HOv2.0-20181130.genome.fasta "$name".R1.fastq.gz "$name".R2.fastq.gz > "$name"_aligned_R1R2.sam
+
+#sort and bam conversion
+java -Xmx65g -XX:ParallelGCThreads=14 -jar $EBROOTPICARD/picard.jar SortSam MAX_RECORDS_IN_RAM=2000000 INPUT="$name"_aligned_R1R2.sam OUTPUT="$name"_aligned_R1R2.bam SORT_ORDER=coordinate
+
+#AddOrReplaceReadGroups
+java -jar $EBROOTPICARD/picard.jar AddOrReplaceReadGroups I="$name"_aligned_R1R2.bam O=1973_"$name"_aligned_R1R2.bam RGID="$name"ID RGLB=lib1  RGPL=illumina RGPU=H0164ALXX140820.2  RGSM=1973_"$name"
+
+#creating index
+java -Xmx20g -XX:ParallelGCThreads=2 -jar $EBROOTPICARD/picard.jar BuildBamIndex -INPUT 1973_"$name"_aligned_R1R2.bam
+
+
+##################################################
+###SNP calling for Lep-Map3
+##################################################
+
+###############step 1, calculate read deepth (RD)
+samtools mpileup -q 10 -Q 10 -s $(cat sorted_bams) | cut -f 4 > RD.txt
+
+##############plot RD
+awk '{bin=int($1)} {count[bin]++} END {for (b in count) print b, count[b]}' RD.txt > binned.txt
+
+
+gnuplot <<EOF
+set terminal pngcairo size 800,600 enhanced font 'Verdana,10'
+set output 'histogram.png'
+
+set boxwidth 0.9
+set style fill solid
+set title "Histogram"
+set xlabel "Bins"
+set ylabel "Frequency"
+
+plot "binned.txt" using 1:2 with boxes title "Histogram"
+EOF
+
+
+awk '$1 < 50' binned.txt > binned_max50.txt
+
+gnuplot <<EOF
+set terminal pngcairo size 800,600 enhanced font 'Verdana,10'
+set output 'histogram_max50.png'
+
+set boxwidth 0.9
+set style fill solid
+set title "Histogram"
+set xlabel "Bins"
+set ylabel "Frequency"
+
+plot "binned_max50.txt" using 1:2 with boxes title "Histogram"
+EOF
+
+#####################SNP calling
+samtools mpileup -q 10 -Q 10 -s $(cat sorted_bams) |  awk '$4 >= 3 && $4 <= 40'  | java -cp /DATA/home/egonzalez/SOFTWARE/LEPMAP3/bin Pileup2Likelihoods mappingFile=mapfile_withparents.txt  maxCoverage=40 | gzip > post_withpaents_RD_3_40.gz
+
+
+
+
+
+
+
+
